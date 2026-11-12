@@ -1,156 +1,302 @@
-'use strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import makeWASocket, {
+    DisconnectReason,
+    downloadMediaMessage,
+    fetchLatestBaileysVersion,
+    useMultiFileAuthState,
+} from '@whiskeysockets/baileys';
+import pino from 'pino';
+import qrcode from 'qrcode-terminal';
+import { sendAudioSticker } from './audio-sticker.js';
+import {
+    extractAudioToOpus,
+    imageToWebp,
+    isAnimatedWebp,
+    videoToWebp,
+} from './media.js';
 
-const fs = require('node:fs');
-const path = require('node:path');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const STICKER_CMD_RE = /^\.(s|stiker)(?:\s+(.+))?$/i;
+const STICKER_CMD_RE = /^\.(s|stiker|sa|stikersuara)(?:\s+(.+))?$/i;
 
-/**
- * Remove stale Chromium Service Worker cache so request interception on remote webVersionCache does not deadlock.
- * @param {string} sessionDir
- */
-// ponytail: Chromium Service Worker cache deadlocks with whatsapp-web.js request interception on remote webVersionCache; remove when webVersion pin is no longer needed
-function clearStaleServiceWorker(sessionDir) {
-    const swDir = path.join(sessionDir, 'Default', 'Service Worker');
-    fs.rmSync(swDir, { recursive: true, force: true });
-}
-
-/**
- * Parse a message body for `.s` or `.stiker` sticker commands.
- * @param {string} body
- * @returns {{ isStickerCmd: boolean, args: string }}
- */
-function parseStickerCommand(body) {
+export function parseStickerCommand(body) {
     if (typeof body !== 'string') {
-        return { isStickerCmd: false, args: '' };
+        return { isStickerCmd: false, mode: null, args: '' };
     }
 
     const match = body.trim().match(STICKER_CMD_RE);
     if (!match) {
-        return { isStickerCmd: false, args: '' };
+        return { isStickerCmd: false, mode: null, args: '' };
     }
 
+    const cmd = match[1].toLowerCase();
+    const mode = cmd === 'sa' || cmd === 'stikersuara' ? 'audio' : 'auto';
     return {
         isStickerCmd: true,
+        mode,
         args: (match[2] || '').trim(),
     };
 }
 
-/**
- * Only process sticker commands sent by the bot owner's own account.
- * @param {{ fromMe?: boolean, body?: string } | null | undefined} msg
- * @returns {boolean}
- */
-function shouldHandleMessage(msg) {
-    return Boolean(msg && msg.fromMe && parseStickerCommand(msg.body).isStickerCmd);
-}
-
-/**
- * Resolve the message carrying media (either the command message or its quoted message).
- * @param {import('whatsapp-web.js').Message} msg
- * @returns {Promise<import('whatsapp-web.js').Message | null>}
- */
-async function resolveMediaMessage(msg) {
-    if (msg.hasMedia) {
-        return msg;
-    }
-
-    if (msg.hasQuotedMsg) {
-        const quoted = await msg.getQuotedMessage();
-        if (quoted && quoted.hasMedia) {
-            return quoted;
+export function unwrapMessage(message) {
+    let current = message;
+    while (current) {
+        if (current.ephemeralMessage?.message) {
+            current = current.ephemeralMessage.message;
+        } else if (current.viewOnceMessage?.message) {
+            current = current.viewOnceMessage.message;
+        } else if (current.viewOnceMessageV2?.message) {
+            current = current.viewOnceMessageV2.message;
+        } else if (current.viewOnceMessageV2Extension?.message) {
+            current = current.viewOnceMessageV2Extension.message;
+        } else if (current.documentWithCaptionMessage?.message) {
+            current = current.documentWithCaptionMessage.message;
+        } else {
+            break;
         }
     }
+    return current || null;
+}
 
+export function extractMessageText(message) {
+    const m = unwrapMessage(message);
+    if (!m) return '';
+    return (
+        m.conversation ||
+        m.extendedTextMessage?.text ||
+        m.imageMessage?.caption ||
+        m.videoMessage?.caption ||
+        ''
+    );
+}
+
+export function shouldHandleMessage(msg) {
+    if (!msg?.key?.fromMe) return false;
+    return parseStickerCommand(extractMessageText(msg.message)).isStickerCmd;
+}
+
+function detectMediaKind(m) {
+    if (!m) return null;
+    if (m.imageMessage) return 'image';
+    if (m.videoMessage) return 'video';
+    if (m.stickerMessage) return 'sticker';
+    if (m.audioMessage) return 'audio';
     return null;
 }
 
-function startBot() {
-    const { Client, LocalAuth } = require('whatsapp-web.js');
-    const qrcode = require('qrcode-terminal');
-    const ffmpegPath = require('ffmpeg-static');
+function extractContextInfo(m) {
+    return (
+        m?.extendedTextMessage?.contextInfo ||
+        m?.imageMessage?.contextInfo ||
+        m?.videoMessage?.contextInfo ||
+        m?.audioMessage?.contextInfo ||
+        m?.stickerMessage?.contextInfo ||
+        null
+    );
+}
 
-    const client = new Client({
-        authStrategy: new LocalAuth(),
-        ffmpegPath,
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        // ponytail: workaround WAWebSocketModel null di WhatsApp Web terbaru (berlaku s.d. 2027-01-16; hapus/update jika wwebjs sudah mendukung alur login baru)
-        webVersion: '2.3000.1054721061-alpha',
-        webVersionCache: {
-            type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
-        },
-        puppeteer: {
-            headless: true,
-        },
+export function extractMediaTargets(msg) {
+    const current = unwrapMessage(msg?.message);
+    const contextInfo = extractContextInfo(current);
+    const quoted = unwrapMessage(contextInfo?.quotedMessage);
+
+    const curKind = detectMediaKind(current);
+    const qKind = detectMediaKind(quoted);
+    const isVisual = (k) => k === 'image' || k === 'video' || k === 'sticker';
+
+    const wrap = (kind, raw) => ({
+        kind,
+        isGif: Boolean(raw?.videoMessage?.gifPlayback),
+        waMsg: { key: msg.key, message: raw },
     });
 
-    client.on('qr', (qr) => {
-        console.log('Scan QR code di bawah dengan WhatsApp (Perangkat Tertaut):');
-        qrcode.generate(qr, { small: true });
-    });
+    if (isVisual(curKind) && qKind === 'audio') {
+        return { visual: wrap(curKind, current), audio: wrap('audio', quoted) };
+    }
+    if (curKind === 'audio' && isVisual(qKind)) {
+        return { visual: wrap(qKind, quoted), audio: wrap('audio', current) };
+    }
+    if (curKind === 'image' || curKind === 'video') {
+        const target = wrap(curKind, current);
+        return { visual: target, audio: curKind === 'video' ? target : null };
+    }
+    if (qKind === 'image' || qKind === 'video') {
+        const target = wrap(qKind, quoted);
+        return { visual: target, audio: qKind === 'video' ? target : null };
+    }
+    return { visual: null, audio: null };
+}
 
-    client.on('ready', () => {
-        console.log('Bot stiker WhatsApp siap! Kirim atau balas gambar/GIF/video dengan .s atau .stiker.');
-    });
+async function handleStickerMessage(sock, msg, logger) {
+    const jid = msg.key.remoteJid;
+    const { mode } = parseStickerCommand(extractMessageText(msg.message));
+    const { visual, audio } = extractMediaTargets(msg);
 
-    client.on('auth_failure', (msg) => {
-        console.error('Autentikasi gagal:', msg);
-    });
+    if (!visual) {
+        await sock.sendMessage(
+            jid,
+            {
+                text:
+                    'Cara pakai:\n' +
+                    '- Kirim/balas gambar, GIF, atau video dengan .s atau .stiker\n' +
+                    '- Untuk stiker bersuara: kirim/balas video bersuara atau gabungkan foto/stiker + balas audio/VN dengan .sa atau .stikersuara',
+            },
+            { quoted: msg },
+        );
+        return;
+    }
 
-    client.on('disconnected', (reason) => {
-        console.log('Koneksi WhatsApp terputus:', reason);
-    });
+    if (mode === 'audio' && !audio) {
+        await sock.sendMessage(
+            jid,
+            {
+                text: 'Untuk .sa / .stikersuara, kirim video bersuara atau balas pesan audio/VN sambil mengirim foto/video/stiker.',
+            },
+            { quoted: msg },
+        );
+        return;
+    }
 
-    client.on('message_create', async (msg) => {
-        if (!shouldHandleMessage(msg)) {
-            return;
-        }
+    const downloadOpts = { reuploadRequest: sock.updateMediaMessage, logger };
+    const visualBuf = await downloadMediaMessage(visual.waMsg, 'buffer', {}, downloadOpts);
+    const stickerBuf =
+        visual.kind === 'video'
+            ? await videoToWebp(visualBuf)
+            : await imageToWebp(visualBuf);
 
+    const shouldTryAudio =
+        mode === 'audio' ||
+        (audio !== null && !(visual.kind === 'video' && visual.isGif));
+
+    if (shouldTryAudio && audio) {
+        const audioSrcBuf =
+            audio === visual
+                ? visualBuf
+                : await downloadMediaMessage(audio.waMsg, 'buffer', {}, downloadOpts);
         try {
-            const targetMsg = await resolveMediaMessage(msg);
-            if (!targetMsg) {
-                await msg.reply('Kirim atau balas gambar/GIF/video dengan caption .s atau .stiker.');
-                return;
-            }
-
-            const media = await targetMsg.downloadMedia();
-            if (!media) {
-                await msg.reply('Gagal mengunduh media. Silakan kirim ulang medianya.');
-                return;
-            }
-
-            await msg.reply(media, undefined, {
-                sendMediaAsSticker: true,
-                stickerName: 'wa-sticker-bot',
-                stickerAuthor: 'raintyaa',
-            });
+            const opus = await extractAudioToOpus(audioSrcBuf);
+            await sendAudioSticker(
+                sock,
+                jid,
+                {
+                    sticker: stickerBuf,
+                    audio: opus.buffer,
+                    seconds: opus.seconds,
+                    waveform: opus.waveform,
+                    isAnimated: isAnimatedWebp(stickerBuf),
+                },
+                msg,
+            );
+            return;
         } catch (err) {
-            console.error('Gagal membuat stiker:', err);
-            await msg.reply('Maaf, terjadi kesalahan saat memproses stiker.').catch(() => {});
+            if (err.message === 'NO_AUDIO_STREAM') {
+                if (mode === 'audio') {
+                    await sock.sendMessage(
+                        jid,
+                        { text: 'Video tersebut tidak memiliki audio. Gunakan video bersuara atau balas audio/VN.' },
+                        { quoted: msg },
+                    );
+                    return;
+                }
+                // Auto mode (.s / .stiker) on muted video: fall through to standard animated sticker
+            } else {
+                throw err;
+            }
+        }
+    }
+
+    await sock.sendMessage(jid, { sticker: stickerBuf }, { quoted: msg });
+}
+
+export async function startBot(authDir = path.join(__dirname, 'auth_info')) {
+    const logger = pino({ level: 'silent' });
+    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    const { version } = await fetchLatestBaileysVersion();
+
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        logger,
+        printQRInTerminal: false,
+    });
+
+    const processedIds = new Set();
+    let shuttingDown = false;
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+        if (qr) {
+            console.log('Scan QR code di bawah dengan WhatsApp (Perangkat Tertaut):');
+            qrcode.generate(qr, { small: true });
+        }
+
+        if (connection === 'open') {
+            console.log('Bot stiker WhatsApp (Baileys) siap! Gunakan .s / .stiker atau .sa / .stikersuara.');
+        } else if (connection === 'close' && !shuttingDown) {
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            if (statusCode === DisconnectReason.loggedOut) {
+                console.log('Sesi WhatsApp logout. Hapus folder auth_info/ lalu jalankan ulang bot untuk scan QR baru.');
+            } else {
+                console.log(`Koneksi terputus (code: ${statusCode ?? 'unknown'}), mencoba menghubungkan ulang...`);
+                setTimeout(() => {
+                    startBot(authDir).catch((err) => {
+                        console.error('Gagal reconnect:', err);
+                    });
+                }, 3000);
+            }
         }
     });
 
-    process.on('SIGINT', async () => {
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return;
+
+        for (const msg of messages) {
+            const msgId = msg?.key?.id;
+            if (msgId && processedIds.has(msgId)) continue;
+            if (!shouldHandleMessage(msg)) continue;
+
+            if (msgId) {
+                processedIds.add(msgId);
+                if (processedIds.size > 500) {
+                    processedIds.delete(processedIds.values().next().value);
+                }
+            }
+
+            try {
+                await handleStickerMessage(sock, msg, logger);
+            } catch (err) {
+                console.error('Gagal memproses stiker:', err);
+                await sock
+                    .sendMessage(
+                        msg.key.remoteJid,
+                        { text: 'Maaf, terjadi kesalahan saat memproses stiker.' },
+                        { quoted: msg },
+                    )
+                    .catch(() => {});
+            }
+        }
+    });
+
+    process.once('SIGINT', () => {
+        shuttingDown = true;
         console.log('\nMenutup bot...');
-        await client.destroy().catch(() => {});
+        sock.end();
         process.exit(0);
     });
 
-    clearStaleServiceWorker(path.join(__dirname, '.wwebjs_auth', 'session'));
+    return sock;
+}
 
-    client.initialize().catch((err) => {
+const isMain =
+    Boolean(process.argv[1]) &&
+    path.resolve(process.argv[1]) === __filename;
+
+if (isMain) {
+    startBot().catch((err) => {
         console.error('Gagal menjalankan bot:', err);
         process.exit(1);
     });
 }
-
-if (require.main === module) {
-    startBot();
-}
-
-module.exports = {
-    clearStaleServiceWorker,
-    parseStickerCommand,
-    shouldHandleMessage,
-};
