@@ -9,7 +9,7 @@
 * **Nama Proyek:** `wa-sticker-bot`
 * **Lokasi Workspace:** `D:\Rakha\wa-sticker-bot`
 * **Tujuan:** Membuat bot WhatsApp pribadi berbasis **Node.js** untuk mengubah gambar, GIF, atau video pendek menjadi stiker WhatsApp secara langsung di chat (misal lewat perintah/caption `.s` atau `.stiker`), sehingga user tidak perlu membuka aplikasi pihak ketiga.
-* **Stack Utama (Opsi 2):** **`whatsapp-web.js`** (menggunakan autentikasi `LocalAuth` dan fitur bawaan `sendMediaAsSticker: true`).
+* **Stack Utama:** **`@whiskeysockets/baileys`** (ESM, `useMultiFileAuthState`, `ffmpeg-static`, `node-webpmux`, plus runtime Protobuf patch untuk native Sound Stickers field `#134`/`#26`).
 * **Target Environment:** Berjalan secara **lokal di laptop Windows** milik user. User hanya perlu menyalakan laptop dan menjalankan skrip bot (misalnya lewat `npm start` atau file `.bat`) saat ingin membuat stiker.
 
 ---
@@ -18,7 +18,7 @@
 
 * **Target Repository:** Proyek ini akan diinisialisasi Git dan di-publish ke akun GitHub user (**`raintyaa`**, misalnya `https://github.com/raintyaa/wa-sticker-bot`).
 * **Aturan Keamanan Kritis:**
-  * **JANGAN PERNAH** meng-commit folder sesi autentikasi WhatsApp (`.wwebjs_auth/`, `.wwebjs_cache/`), `node_modules/`, maupun file `.env` ke GitHub.
+  * **JANGAN PERNAH** meng-commit folder sesi autentikasi WhatsApp (`auth_info/`, `.wwebjs_auth/`, `.wwebjs_cache/`), `node_modules/`, maupun file `.env` ke GitHub.
   * File `.gitignore` wajib dibuat dan diverifikasi **sebelum** menjalankan `git add .` atau `git commit` pertama.
 
 ---

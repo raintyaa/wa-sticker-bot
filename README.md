@@ -1,19 +1,25 @@
 # wa-sticker-bot
 
-Bot WhatsApp pribadi berbasis Node.js (`whatsapp-web.js`) untuk mengubah gambar, GIF, atau video pendek menjadi stiker WhatsApp langsung dari chat di Windows.
+Bot WhatsApp pribadi berbasis Node.js (`@whiskeysockets/baileys`) untuk mengubah gambar, GIF, dan video — termasuk **stiker video bersuara (*Sound Stickers*)** — langsung dari chat di Windows tanpa perlu browser Chromium/Puppeteer.
 
 ## Fitur Saat Ini
 
 * **Mode Pribadi (`fromMe`):** Hanya memproses perintah dari akun WhatsApp Anda sendiri (misalnya di chat *Note to Self* atau chat mana saja yang Anda kirim).
-* **Perintah `.s` atau `.stiker`:**
-  * Kirim gambar, GIF, atau video pendek dengan caption `.s` / `.stiker`.
-  * Atau balas (*reply*) pesan gambar/GIF/video yang sudah ada dengan `.s` / `.stiker`.
-* **Stiker Animasi (GIF/Video):** Menggunakan `ffmpeg-static` bawaan tanpa perlu instalasi FFmpeg manual di `PATH` Windows.
-* **Autentikasi Persisten:** Menggunakan `LocalAuth` sehingga cukup scan QR sekali selama sesi belum logout.
+* **Perintah `.s` atau `.stiker` (Otomatis):**
+  * **Gambar:** diubah menjadi stiker statis WebP 512×512 dengan metadata pack (`wa-sticker-bot` / `raintyaa`).
+  * **GIF / Video tanpa suara:** diubah menjadi stiker animasi WebP adaptif (< 1 MB).
+  * **Video bersuara:** otomatis dikonversi menjadi **native Sound Sticker** (animasi WebP + audio OGG/Opus).
+* **Perintah `.sa` atau `.stikersuara` (Khusus Stiker Bersuara):**
+  * Kirim atau balas **video bersuara** dengan `.sa` / `.stikersuara`.
+  * Atau gabungkan **foto/stiker/video** dengan **balasan audio/VN** (atau sebaliknya).
+* **Tanpa FFmpeg Manual:** Memakai `ffmpeg-static` bawaan (sudah mendukung `libwebp_anim` dan `libopus`).
+* **Autentikasi Persisten:** Menyimpan sesi di `auth_info/` lewat `useMultiFileAuthState` sehingga cukup scan QR sekali selama sesi belum logout.
 
-## Catatan Tentang Stiker Video Bersuara
+## Cara Kerja Stiker Video Bersuara
 
-Saat video/GIF dikonversi menjadi stiker, `whatsapp-web.js` (`v1.34.8`, pada `src/util/Util.js`) mengonversi media ke format animasi WebP (`image/webp`, maksimal 5 detik) dengan opsi FFmpeg `-an` (menghapus seluruh stream audio) dan tidak menyediakan opsi stiker bersuara di `MessageSendOptions`. Artinya, video yang dikirim tetap bisa menjadi **stiker animasi**, tetapi **tanpa suara**.
+WhatsApp mengirim *Sound Stickers* melalui struktur Protobuf baru (`Message.audioStickerMessage` field `#134` yang membungkus `StickerMessage` dengan `audioMessage` di field `#26`). Karena `@whiskeysockets/baileys@7.0.0-rc14` belum menyertakan kedua field tersebut secara bawaan, [audio-sticker.js](audio-sticker.js) menerapkan *runtime patch* pada encoder Protobuf (tanpa memodifikasi `node_modules/`) dan mengirim payload via `sock.relayMessage` dengan `additionalAttributes: { type: 'text' }`.
+
+*(Catatan: pemutaran audio pada stiker bergantung pada dukungan fitur Sound Stickers di versi aplikasi WhatsApp penerima).*
 
 ## Cara Menjalankan
 
@@ -26,20 +32,20 @@ Saat video/GIF dikonversi menjadi stiker, `whatsapp-web.js` (`v1.34.8`, pada `sr
    npm start
    ```
    Atau klik dua kali file `start.bat` di Windows.
-3. Scan QR code yang muncul di terminal menggunakan aplikasi WhatsApp di HP (**Perangkat Tertaut**).
+3. Scan QR code yang muncul di terminal menggunakan WhatsApp di HP (**Perangkat Tertaut** → **Tautkan Perangkat**).
 
 ## Pengujian
 
-Jalankan unit check bawaan (tidak perlu login WhatsApp):
+Jalankan seluruh unit test (parser perintah, pipeline FFmpeg WebP/Opus, dan wire layout Protobuf `#134`/`#26`):
 ```powershell
 npm test
 ```
 
 ## Keamanan
 
-Jangan pernah membagikan atau meng-commit folder `.wwebjs_auth/`, `.wwebjs_cache/`, `node_modules/`, maupun file `.env`. File `.gitignore` sudah dikonfigurasi untuk mengecualikan folder-folder tersebut.
+Jangan pernah membagikan atau meng-commit folder `auth_info/`, `.wwebjs_auth/`, `.wwebjs_cache/`, `node_modules/`, maupun file `.env`. File `.gitignore` sudah dikonfigurasi untuk mengecualikan seluruh folder tersebut.
 
 ## Troubleshooting
 
-* **TimeoutError 30000ms saat startup (`Client.js:139`):** `index.js` mem-pin `webVersion` (`2.3000.1054721061-alpha`, berlaku hingga 16 Jan 2027) melalui `webVersionCache` remote dan `userAgent` Chrome Windows sebagai workaround untuk `WAWebSocketModel` yang bernilai `null` pada halaman login terbaru WhatsApp Web di `whatsapp-web.js@1.34.8`. Jika versi tersebut kedaluwarsa di kemudian hari, perbarui `webVersion` dari daftar `wppconnect-team/wa-version` atau update `whatsapp-web.js`.
-* **`ProtocolError: Page.navigate timed out` pada startup ke-2:** `index.js` otomatis menghapus folder `.wwebjs_auth/session/Default/Service Worker` sebelum memulai bot untuk mencegah deadlock *request interception* di Chromium, tanpa menghapus data login WhatsApp (`IndexedDB` / `Local Storage`).
+* **Sesi logout (`DisconnectReason.loggedOut`):** Hapus folder `auth_info/` lalu jalankan ulang `npm start` untuk memindai QR code baru.
+* **QR code terpotong di terminal:** Perbesar jendela terminal atau perkecil ukuran font (`Ctrl` + `-`) sebelum memindai.
