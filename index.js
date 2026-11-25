@@ -1,6 +1,19 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 const STICKER_CMD_RE = /^\.(s|stiker)(?:\s+(.+))?$/i;
+
+/**
+ * Remove stale Chromium Service Worker cache so request interception on remote webVersionCache does not deadlock.
+ * @param {string} sessionDir
+ */
+// ponytail: Chromium Service Worker cache deadlocks with whatsapp-web.js request interception on remote webVersionCache; remove when webVersion pin is no longer needed
+function clearStaleServiceWorker(sessionDir) {
+    const swDir = path.join(sessionDir, 'Default', 'Service Worker');
+    fs.rmSync(swDir, { recursive: true, force: true });
+}
 
 /**
  * Parse a message body for `.s` or `.stiker` sticker commands.
@@ -124,6 +137,8 @@ function startBot() {
         process.exit(0);
     });
 
+    clearStaleServiceWorker(path.join(__dirname, '.wwebjs_auth', 'session'));
+
     client.initialize().catch((err) => {
         console.error('Gagal menjalankan bot:', err);
         process.exit(1);
@@ -135,6 +150,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+    clearStaleServiceWorker,
     parseStickerCommand,
     shouldHandleMessage,
 };

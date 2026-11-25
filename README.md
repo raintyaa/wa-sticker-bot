@@ -42,3 +42,4 @@ Jangan pernah membagikan atau meng-commit folder `.wwebjs_auth/`, `.wwebjs_cache
 ## Troubleshooting
 
 * **TimeoutError 30000ms saat startup (`Client.js:139`):** `index.js` mem-pin `webVersion` (`2.3000.1054721061-alpha`, berlaku hingga 16 Jan 2027) melalui `webVersionCache` remote dan `userAgent` Chrome Windows sebagai workaround untuk `WAWebSocketModel` yang bernilai `null` pada halaman login terbaru WhatsApp Web di `whatsapp-web.js@1.34.8`. Jika versi tersebut kedaluwarsa di kemudian hari, perbarui `webVersion` dari daftar `wppconnect-team/wa-version` atau update `whatsapp-web.js`.
+* **`ProtocolError: Page.navigate timed out` pada startup ke-2:** `index.js` otomatis menghapus folder `.wwebjs_auth/session/Default/Service Worker` sebelum memulai bot untuk mencegah deadlock *request interception* di Chromium, tanpa menghapus data login WhatsApp (`IndexedDB` / `Local Storage`).
